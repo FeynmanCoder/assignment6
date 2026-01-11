@@ -6,8 +6,12 @@ __pycache__/
 # Virtual Environments
 venv/
 env/
-.env/
 .venv/
+
+# Environment Variables (敏感信息)
+.env
+.env.local
+.env.*.local
 
 # Distribution / Packaging
 build/
