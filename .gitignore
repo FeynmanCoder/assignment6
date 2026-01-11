@@ -41,6 +41,15 @@ wheels/
 .DS_Store
 Thumbs.db
 
+# 论文阅读Agent - 工作文件夹
+# 论文文件夹（排除所有内容但保留.gitkeep）
+papers/*
+!papers/.gitkeep
+
+# 输出文件夹（排除所有内容但保留.gitkeep）
+output/*
+!output/.gitkeep
+
 # AI / ML specific (Large files usually ignored)
 data/
 models/

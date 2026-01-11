@@ -353,19 +353,113 @@ class PaperReadingAgent:
         print(f"分析报告: {report_path}")
         
         return report_path
+    
+    def batch_process_papers(self, papers_dir: str = "papers", output_dir: str = "output") -> List[str]:
+        """
+        批量处理papers文件夹中的所有PDF论文
+        
+        Args:
+            papers_dir: 存放PDF论文的文件夹路径（默认: papers）
+            output_dir: 输出目录（默认: output）
+            
+        Returns:
+            所有生成的分析报告路径列表
+        """
+        papers_path = Path(papers_dir)
+        output_path = Path(output_dir)
+        
+        # 确保目录存在
+        if not papers_path.exists():
+            papers_path.mkdir(parents=True, exist_ok=True)
+            print(f"已创建论文文件夹: {papers_path}")
+        
+        if not output_path.exists():
+            output_path.mkdir(parents=True, exist_ok=True)
+            print(f"已创建输出文件夹: {output_path}")
+        
+        # 查找所有PDF文件
+        pdf_files = list(papers_path.glob("*.pdf"))
+        
+        if not pdf_files:
+            print(f"\n⚠️  在 {papers_path} 文件夹中没有找到PDF文件")
+            print(f"请将PDF论文放入 {papers_path} 文件夹后再运行程序")
+            return []
+        
+        print(f"\n找到 {len(pdf_files)} 篇论文待处理")
+        print("=" * 60)
+        
+        results = []
+        successful = 0
+        failed = 0
+        
+        for i, pdf_file in enumerate(pdf_files, 1):
+            print(f"\n{'=' * 60}")
+            print(f"处理进度: [{i}/{len(pdf_files)}]")
+            print(f"当前论文: {pdf_file.name}")
+            print("=" * 60)
+            
+            try:
+                report_path = self.process_paper(str(pdf_file), str(output_path))
+                results.append(report_path)
+                successful += 1
+                print(f"\n✅ 成功: {pdf_file.name}")
+            except Exception as e:
+                failed += 1
+                print(f"\n❌ 失败: {pdf_file.name}")
+                print(f"错误信息: {e}")
+                import traceback
+                traceback.print_exc()
+        
+        # 打印总结
+        print("\n" + "=" * 60)
+        print("批量处理完成！")
+        print("=" * 60)
+        print(f"总计: {len(pdf_files)} 篇论文")
+        print(f"成功: {successful} 篇")
+        print(f"失败: {failed} 篇")
+        print(f"\n所有结果已保存到: {output_path.absolute()}")
+        
+        return results
 
 
 def main():
-    """主函数 - 示例用法"""
+    """主函数 - 支持单个文件和批量处理"""
     import argparse
     
-    parser = argparse.ArgumentParser(description="论文阅读Agent - 分析论文并学习写作")
-    parser.add_argument("pdf_path", help="PDF论文文件路径")
+    parser = argparse.ArgumentParser(
+        description="论文阅读Agent - 自动批量分析papers文件夹中的所有论文",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+使用示例:
+  # 批量处理papers文件夹中的所有论文（推荐）
+  python main.py
+  
+  # 批量处理，使用Gemini
+  python main.py --provider gemini
+  
+  # 处理单个PDF文件
+  python main.py --single paper.pdf
+  
+  # 指定自定义文件夹
+  python main.py --papers-dir ./my_papers --output-dir ./my_output
+        """
+    )
+    
+    # 模式选择
+    parser.add_argument("--single", metavar="PDF_FILE", 
+                        help="单文件模式：处理指定的PDF文件")
+    
+    # 批量处理参数
+    parser.add_argument("--papers-dir", default="papers",
+                        help="论文文件夹路径 (默认: papers)")
+    parser.add_argument("--output-dir", default="output",
+                        help="输出目录路径 (默认: output)")
+    
+    # LLM配置
     parser.add_argument("--provider", choices=["openai", "gemini"], default="openai",
                         help="LLM提供商 (默认: openai)")
     parser.add_argument("--model", help="模型名称 (如: gpt-4, gemini-pro)")
     parser.add_argument("--api-key", help="API密钥 (也可通过环境变量设置)")
-    parser.add_argument("--output-dir", help="输出目录 (默认: PDF同目录)")
     
     args = parser.parse_args()
     
@@ -376,15 +470,34 @@ def main():
     if args.model:
         llm_kwargs["model"] = args.model
     
-    # 创建Agent并处理论文
+    # 创建Agent
     try:
+        print("\n初始化论文阅读Agent...")
+        print(f"LLM提供商: {args.provider}")
+        if args.model:
+            print(f"模型: {args.model}")
+        
         agent = PaperReadingAgent(llm_provider=args.provider, **llm_kwargs)
-        agent.process_paper(args.pdf_path, args.output_dir)
+        
+        # 判断是单文件模式还是批量处理模式
+        if args.single:
+            # 单文件模式
+            print(f"\n📄 单文件模式")
+            agent.process_paper(args.single, args.output_dir)
+        else:
+            # 批量处理模式（默认）
+            print(f"\n📚 批量处理模式")
+            print(f"论文文件夹: {Path(args.papers_dir).absolute()}")
+            print(f"输出文件夹: {Path(args.output_dir).absolute()}")
+            agent.batch_process_papers(args.papers_dir, args.output_dir)
+        
+        return 0
+        
     except Exception as e:
-        print(f"\n错误: {e}")
+        print(f"\n❌ 错误: {e}")
+        import traceback
+        traceback.print_exc()
         return 1
-    
-    return 0
 
 
 if __name__ == "__main__":

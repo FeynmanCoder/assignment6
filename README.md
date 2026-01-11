@@ -4,10 +4,36 @@
 
 ## 功能特点
 
-✨ **多LLM支持**: 支持OpenAI (GPT-4) 和 Google Gemini，可自由切换
-📄 **PDF转换**: 无损将PDF论文转换为Markdown格式，保留所有文字和图片
-🔍 **深度分析**: 从多个维度分析论文（基本信息、结构、图表、写作技巧等）
-📝 **自动报告**: 生成详细的Markdown格式分析报告
+✨ **多LLM支持**: 支持OpenAI (GPT-4) 和 Google Gemini，可自由切换  
+📄 **PDF转换**: 无损将PDF论文转换为Markdown格式，保留所有文字和图片  
+🔍 **深度分析**: 从多个维度分析论文（基本信息、结构、图表、写作技巧等）  
+📝 **自动报告**: 生成详细的Markdown格式分析报告  
+🚀 **批量处理**: 自动处理papers文件夹中的所有论文（新功能！）
+
+## 快速开始（3步）⚡
+
+### 1. 安装依赖
+```bash
+pip install -r requirements.txt
+```
+
+### 2. 配置API密钥
+复制 `.env.example` 为 `.env`，填入你的API密钥
+
+### 3. 批量处理论文
+```bash
+# 将PDF论文放入 papers/ 文件夹
+# 运行程序
+python main.py
+
+# 查看结果：output/ 文件夹
+```
+
+**就这么简单！** 🎉
+
+详细使用指南：[BATCH_GUIDE.md](BATCH_GUIDE.md)
+
+---
 
 ## 安装
 
@@ -38,20 +64,40 @@ GEMINI_API_KEY=your_gemini_api_key_here
 
 ## 使用方法
 
-### 基本用法
+### 批量处理模式（推荐）🔥
+
+**最简单的使用方式**：
 
 ```bash
-# 使用OpenAI (默认)
-python main.py paper.pdf
+# 1. 将PDF论文放入 papers/ 文件夹
+# 2. 运行程序
+python main.py
 
 # 使用Gemini
-python main.py paper.pdf --provider gemini
+python main.py --provider gemini
 
-# 指定模型
-python main.py paper.pdf --provider openai --model gpt-4
+# 指定不同的文件夹
+python main.py --papers-dir ./my_papers --output-dir ./my_output
+```
+
+程序会自动处理 `papers/` 文件夹中的所有PDF文件，结果保存到 `output/` 文件夹。
+
+详细说明：[BATCH_GUIDE.md](BATCH_GUIDE.md)
+
+### 单文件处理模式
+
+如果只想处理一篇论文：
+
+```bash
+# 处理单个文件
+python main.py --single paper.pdf
+
+# 使用Gemini
+python main.py --single paper.pdf --provider gemini
 
 # 指定输出目录
-python main.py paper.pdf --output-dir ./output
+python main.py --single paper.pdf --output-dir ./output
+```
 
 # 直接提供API密钥
 python main.py paper.pdf --api-key your_api_key_here
