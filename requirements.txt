@@ -1,0 +1,7 @@
+# 必需的依赖
+openai>=1.0.0
+google-generativeai>=0.3.0
+pymupdf4llm>=0.0.1
+
+# 可选依赖
+python-dotenv>=1.0.0  # 用于环境变量管理
