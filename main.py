@@ -9,6 +9,13 @@ from abc import ABC, abstractmethod
 import json
 from pathlib import Path
 
+# 加载环境变量
+try:
+    from dotenv import load_dotenv
+    load_dotenv()  # 自动加载.env文件
+except ImportError:
+    pass  # 如果没有安装python-dotenv，跳过
+
 
 class LLMProvider(ABC):
     """LLM提供商的抽象基类"""
@@ -22,15 +29,21 @@ class LLMProvider(ABC):
 class OpenAIProvider(LLMProvider):
     """OpenAI (ChatGPT) 提供商"""
     
-    def __init__(self, api_key: Optional[str] = None, model: str = "gpt-4"):
+    def __init__(self, api_key: Optional[str] = None, model: str = "gpt-4o-mini", base_url: Optional[str] = None):
         self.api_key = api_key or os.getenv("OPENAI_API_KEY")
+        self.base_url = base_url or os.getenv("OPENAI_BASE_URL")
         self.model = model
+        
         if not self.api_key:
             raise ValueError("需要提供OpenAI API密钥")
         
         try:
             from openai import OpenAI
-            self.client = OpenAI(api_key=self.api_key)
+            # 创建客户端，支持自定义base_url
+            client_kwargs = {"api_key": self.api_key}
+            if self.base_url:
+                client_kwargs["base_url"] = self.base_url
+            self.client = OpenAI(**client_kwargs)
         except ImportError:
             raise ImportError("请安装openai库: pip install openai")
     
@@ -82,12 +95,24 @@ class GeminiProvider(LLMProvider):
 class PDFConverter:
     """将PDF转换为Markdown的转换器"""
     
-    def __init__(self):
-        pass
+    def __init__(self, use_mineru: bool = False, mineru_token: Optional[str] = None):
+        """
+        初始化PDF转换器
+        
+        Args:
+            use_mineru: 是否使用MinerU API（更好地支持图片和公式）
+            mineru_token: MinerU API token（可从环境变量MINERU_TOKEN读取）
+        """
+        self.use_mineru = use_mineru
+        self.mineru_token = mineru_token or os.getenv('MINERU_TOKEN')
+        
+        if use_mineru and not self.mineru_token:
+            print("警告: 未提供MinerU token，将回退到pymupdf4llm")
+            self.use_mineru = False
     
     def convert_to_markdown(self, pdf_path: str, output_dir: Optional[str] = None) -> str:
         """
-        将PDF转换为Markdown
+        将PDF转换为Markdown（支持图片和公式提取）
         
         Args:
             pdf_path: PDF文件路径
@@ -96,17 +121,9 @@ class PDFConverter:
         Returns:
             转换后的markdown文件路径
         """
-        try:
-            import pymupdf4llm
-        except ImportError:
-            raise ImportError("请安装pymupdf4llm库: pip install pymupdf4llm")
-        
         pdf_path = Path(pdf_path)
         if not pdf_path.exists():
             raise FileNotFoundError(f"PDF文件不存在: {pdf_path}")
-        
-        # 转换PDF到markdown
-        md_text = pymupdf4llm.to_markdown(str(pdf_path))
         
         # 确定输出路径
         if output_dir:
@@ -114,6 +131,129 @@ class PDFConverter:
             output_path.parent.mkdir(parents=True, exist_ok=True)
         else:
             output_path = pdf_path.with_suffix('.md')
+        
+        # 如果已存在转换结果，跳过转换
+        if output_path.exists():
+            print(f"⚠️  已存在Markdown文件，跳过转换: {output_path}")
+            print(f"提示：如需重新转换，请删除output文件夹或该文件")
+            return str(output_path)
+        
+        # 尝试使用MinerU API（更好的图片和公式支持）
+        if self.use_mineru:
+            print(f"📡 使用MinerU API转换PDF（支持图片和公式）...")
+            try:
+                return self._convert_with_mineru(pdf_path, output_path)
+            except Exception as e:
+                print(f"❌ MinerU转换失败，回退到pymupdf4llm: {e}")
+        else:
+            print(f"⚡ 使用pymupdf4llm快速转换...")
+        
+        # 使用pymupdf4llm作为备选
+        return self._convert_with_pymupdf(pdf_path, output_path)
+    
+    def _convert_with_mineru(self, pdf_path: Path, output_path: Path) -> str:
+        """使用MinerU API转换（支持图片和公式）"""
+        import requests
+        import uuid
+        import time
+        import zipfile
+        import shutil
+        
+        header = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {self.mineru_token}"
+        }
+        
+        # 1. 申请上传URL
+        url = "https://mineru.net/api/v4/file-urls/batch"
+        data = {
+            "enable_formula": True,  # 启用公式识别
+            "enable_table": True,
+            "model_version": "vlm",
+            "files": [{"name": pdf_path.name, "data_id": str(uuid.uuid4())}]
+        }
+        
+        response = requests.post(url, headers=header, json=data)
+        response.raise_for_status()
+        result = response.json()
+        
+        if result.get("code") != 0:
+            raise Exception(f"申请上传失败: {result}")
+        
+        batch_id = result["data"]["batch_id"]
+        upload_url = result["data"]["file_urls"][0]
+        
+        # 2. 上传PDF
+        print(f"📤 正在上传PDF文件...")
+        with open(pdf_path, 'rb') as f:
+            upload_response = requests.put(upload_url, data=f)
+            upload_response.raise_for_status()
+        
+        print(f"✅ 上传成功！批次ID: {batch_id}")
+        print(f"⏳ 等待MinerU处理（可能需要1-3分钟）...")
+        
+        # 3. 轮询结果
+        retrieve_url = f"https://mineru.net/api/v4/extract-results/batch/{batch_id}"
+        max_retry = 180
+        retry = 0
+        
+        while retry < max_retry:
+            time.sleep(3)
+            res = requests.get(retrieve_url, headers=header)
+            res.raise_for_status()
+            payload = res.json()
+            results = payload.get("data", {}).get("extract_result", [])
+            
+            if results and results[0].get("state") == "done":
+                zip_url = results[0].get("full_zip_url")
+                if not zip_url:
+                    raise Exception("未获取到下载链接")
+                
+                print(f"✅ MinerU处理完成，正在下载结果...")
+                
+                # 4. 下载并解压结果
+                zip_path = output_path.with_suffix('.zip')
+                response = requests.get(zip_url, stream=True)
+                response.raise_for_status()
+                
+                with open(zip_path, 'wb') as f:
+                    for chunk in response.iter_content(chunk_size=8192):
+                        if chunk:
+                            f.write(chunk)
+                
+                # 5. 解压并提取markdown
+                with zipfile.ZipFile(zip_path, 'r') as zf:
+                    # 提取full.md
+                    if 'full.md' in zf.namelist():
+                        with zf.open('full.md') as src:
+                            with open(output_path, 'wb') as dst:
+                                shutil.copyfileobj(src, dst)
+                    
+                    # 提取images文件夹
+                    images_dir = output_path.parent / "images"
+                    images_dir.mkdir(exist_ok=True)
+                    for member in zf.namelist():
+                        if member.startswith('images/'):
+                            zf.extract(member, output_path.parent)
+                
+                print(f"PDF已转换为Markdown（含图片和公式）: {output_path}")
+                return str(output_path)
+            
+            retry += 1
+            if retry % 10 == 0:
+                print(f"等待转换完成... ({retry}/{max_retry})")
+        
+        raise Exception("转换超时")
+    
+    def _convert_with_pymupdf(self, pdf_path: Path, output_path: Path) -> str:
+        """使用pymupdf4llm转换（备选方案）"""
+        try:
+            import pymupdf4llm
+        except ImportError:
+            raise ImportError("请安装pymupdf4llm库: pip install pymupdf4llm")
+        
+        # 转换PDF到markdown
+        md_text = pymupdf4llm.to_markdown(str(pdf_path))
         
         # 保存markdown文件
         with open(output_path, 'w', encoding='utf-8') as f:
@@ -126,13 +266,50 @@ class PDFConverter:
 class PaperAnalyzer:
     """论文分析器 - 核心类"""
     
+    @staticmethod
+    def extract_images_from_markdown(markdown_path: Path) -> List[Path]:
+        """从markdown文件中提取图片路径"""
+        import re
+        
+        with open(markdown_path, 'r', encoding='utf-8') as f:
+            content = f.read()
+        
+        # 匹配 ![...](images/xxx.png) 格式
+        image_pattern = r'!\[.*?\]\((images/[^)]+)\)'
+        image_refs = re.findall(image_pattern, content)
+        
+        # 转换为绝对路径
+        base_dir = markdown_path.parent
+        image_paths = []
+        for ref in image_refs:
+            img_path = base_dir / ref
+            if img_path.exists():
+                image_paths.append(img_path)
+        
+        return image_paths
+    
+    @staticmethod
+    def image_to_base64(image_path: Path) -> str:
+        """将图片转换为base64编码"""
+        import base64
+        
+        with open(image_path, 'rb') as f:
+            image_data = f.read()
+        
+        # 获取图片格式
+        ext = image_path.suffix.lower().lstrip('.')
+        if ext == 'jpg':
+            ext = 'jpeg'
+        
+        base64_str = base64.b64encode(image_data).decode('utf-8')
+        return f"data:image/{ext};base64,{base64_str}"
+    
     # 论文分析问题模板
     ANALYSIS_QUESTIONS = [
         {
             "category": "基本信息",
             "questions": [
                 "这篇论文发表在什么平台（期刊或会议）？该平台在该领域的权威性如何？",
-                "这篇论文属于什么研究领域？主要研究方向是什么？",
                 "这篇论文的主要创新点是什么？与现有工作相比有哪些突破？",
             ]
         },
@@ -163,16 +340,6 @@ class PaperAnalyzer:
                 "论文的语言表达有什么特点？如何保持学术性的同时提高可读性？",
                 "这篇论文在写作上有哪些值得学习的地方？又有哪些可以改进的地方？",
             ]
-        },
-        {
-            "category": "深度思考",
-            "questions": [
-                "这篇论文解决了什么核心问题？为什么这个问题重要？",
-                "论文的方法论有什么独特之处？为什么作者选择这种方法？",
-                "实验设计如何验证论文的核心假设？实验的完整性和说服力如何？",
-                "论文的局限性是什么？未来可能的研究方向有哪些？",
-                "这篇论文对我自己的研究有什么启发？",
-            ]
         }
     ]
     
@@ -191,10 +358,16 @@ class PaperAnalyzer:
             分析结果字典
         """
         # 读取论文内容
-        with open(markdown_path, 'r', encoding='utf-8') as f:
+        md_path = Path(markdown_path)
+        with open(md_path, 'r', encoding='utf-8') as f:
             paper_content = f.read()
         
-        print("开始分析论文...")
+        # 提取图片
+        image_paths = self.extract_images_from_markdown(md_path)
+        print(f"开始分析论文...")
+        print(f"论文字数: {len(paper_content)}")
+        print(f"论文图片数: {len(image_paths)}")
+        
         results = {
             "paper_path": markdown_path,
             "categories": []
@@ -214,22 +387,64 @@ class PaperAnalyzer:
             for i, question in enumerate(questions, 1):
                 print(f"  问题 {i}/{len(questions)}: {question[:50]}...")
                 
-                # 构建提示词
-                messages = [
-                    {
-                        "role": "system",
-                        "content": "你是一位资深的学术论文写作专家，擅长分析论文结构和写作技巧。"
-                    },
-                    {
-                        "role": "user",
-                        "content": f"""请仔细阅读以下论文内容，并回答问题。
+                # 根据类别选择不同的提示词策略
+                if category == "基本信息":
+                    # 基本信息类：严格精简
+                    requirement = "要求：2-3个要点，每点不超过20字，总共<60字。"
+                    system_prompt = """你是论文分析专家。回答必须极简：
 
-论文内容：
-{paper_content}
+严格要求：
+1. 只用要点列表，不用段落
+2. 2-3个要点，每个不超过20字
+3. 直接给结论，不要解释过程
+4. 用数据/名词而非描述
+5. 总字数<60字
+6. 如果看到图片，优先分析图片内容"""
+                else:
+                    # 其他类别：宽松限制，但要求简洁
+                    requirement = "要求：10个要点以内，每个要点不超过100字。请你尽可能简洁地回答，切中要点，不要有冗余的表达。"
+                    system_prompt = """你是论文分析专家。回答要简洁明了：
+
+要求：
+1. 使用要点列表形式，逻辑清晰
+2. 最多10个要点，每个要点不超过100字
+3. 切中要点，避免冗余表达
+4. 结合论文的具体内容和图片进行分析
+5. 用具体的数据、方法名、章节名等实质性信息
+6. 如果看到图片，优先分析图片传达的核心信息"""
+                
+                # 构建用户消息内容（支持多模态）
+                user_content = [
+                    {
+                        "type": "text",
+                        "text": f"""{paper_content}
 
 问题：{question}
 
-请提供详细、专业的回答，并给出具体的例子和分析。"""
+{requirement}"""
+                    }
+                ]
+                
+                # 添加图片（限制前5张，避免token过多）
+                for img_path in image_paths[:5]:
+                    try:
+                        base64_image = self.image_to_base64(img_path)
+                        user_content.append({
+                            "type": "image_url",
+                            "image_url": {"url": base64_image}
+                        })
+                    except Exception as e:
+                        print(f"    警告: 无法加载图片 {img_path.name}: {e}")
+                
+                # 构建消息
+                messages = [
+                    {
+                        "role": "system",
+                        "content": system_prompt
+                    },
+                    {
+                        "role": "user",
+                        "content": user_content
                     }
                 ]
                 
@@ -293,12 +508,13 @@ class PaperAnalyzer:
 class PaperReadingAgent:
     """论文阅读Agent - 主入口类"""
     
-    def __init__(self, llm_provider: str = "openai", **llm_kwargs):
+    def __init__(self, llm_provider: str = "openai", use_mineru: bool = True, **llm_kwargs):
         """
         初始化论文阅读Agent
         
         Args:
             llm_provider: LLM提供商 ("openai" 或 "gemini")
+            use_mineru: 是否使用MinerU API转换PDF（更好的图片和公式支持）
             **llm_kwargs: LLM提供商的额外参数
         """
         # 初始化LLM
@@ -310,7 +526,7 @@ class PaperReadingAgent:
             raise ValueError(f"不支持的LLM提供商: {llm_provider}")
         
         # 初始化PDF转换器和论文分析器
-        self.pdf_converter = PDFConverter()
+        self.pdf_converter = PDFConverter(use_mineru=use_mineru)
         self.analyzer = PaperAnalyzer(self.llm)
     
     def process_paper(self, pdf_path: str, output_dir: Optional[str] = None) -> str:
@@ -331,6 +547,21 @@ class PaperReadingAgent:
         # 步骤1: 转换PDF到Markdown
         print("\n步骤1: 转换PDF到Markdown...")
         markdown_path = self.pdf_converter.convert_to_markdown(pdf_path, output_dir)
+        
+        # 提示用户检查markdown文件
+        print("\n" + "=" * 60)
+        print(f"✅ Markdown转换完成：{markdown_path}")
+        print("\n您可以先检查转换结果：")
+        print(f"  - Markdown文件: {markdown_path}")
+        if Path(markdown_path).parent.joinpath('images').exists():
+            print(f"  - 图片文件夹: {Path(markdown_path).parent / 'images'}")
+        print("\n按回车键继续分析，或 Ctrl+C 中止...")
+        print("=" * 60)
+        try:
+            input()
+        except KeyboardInterrupt:
+            print("\n\n已取消分析")
+            return markdown_path
         
         # 步骤2: 分析论文
         print("\n步骤2: 分析论文...")
@@ -458,8 +689,12 @@ def main():
     # LLM配置
     parser.add_argument("--provider", choices=["openai", "gemini"], default="openai",
                         help="LLM提供商 (默认: openai)")
-    parser.add_argument("--model", help="模型名称 (如: gpt-4, gemini-pro)")
+    parser.add_argument("--model", help="模型名称 (如: gpt-5, gemini-pro)")
     parser.add_argument("--api-key", help="API密钥 (也可通过环境变量设置)")
+    
+    # PDF转换配置
+    parser.add_argument("--no-mineru", action="store_true",
+                        help="不使用MinerU API，改用pymupdf4llm快速模式（图片公式支持有限）")
     
     args = parser.parse_args()
     
@@ -477,7 +712,14 @@ def main():
         if args.model:
             print(f"模型: {args.model}")
         
-        agent = PaperReadingAgent(llm_provider=args.provider, **llm_kwargs)
+        # 默认使用MinerU，除非指定--no-mineru
+        use_mineru = not args.no_mineru
+        if use_mineru:
+            print(f"PDF转换: MinerU API（完美支持图片和公式）")
+        else:
+            print(f"PDF转换: pymupdf4llm（快速模式，图片公式支持有限）")
+        
+        agent = PaperReadingAgent(llm_provider=args.provider, use_mineru=use_mineru, **llm_kwargs)
         
         # 判断是单文件模式还是批量处理模式
         if args.single:
