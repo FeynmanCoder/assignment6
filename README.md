@@ -2,8 +2,8 @@
 
 ## 学生信息
 - 项目名：[学术反刍]
-- 姓名：[王思杰]
-- 学号：[2400011491]
+- 姓名：[]
+- 学号：[]
 - Github地址：https://github.com/FeynmanCoder/assignment6
 
 ## 运行方法
