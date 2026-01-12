@@ -39,8 +39,12 @@ class OpenAIProvider(LLMProvider):
         
         try:
             from openai import OpenAI
-            # 创建客户端，支持自定义base_url
-            client_kwargs = {"api_key": self.api_key}
+            # 创建客户端，支持自定义base_url和超时设置
+            client_kwargs = {
+                "api_key": self.api_key,
+                "timeout": 120.0,  # 120秒超时
+                "max_retries": 3   # 最多重试3次
+            }
             if self.base_url:
                 client_kwargs["base_url"] = self.base_url
             self.client = OpenAI(**client_kwargs)
@@ -48,13 +52,25 @@ class OpenAIProvider(LLMProvider):
             raise ImportError("请安装openai库: pip install openai")
     
     def chat(self, messages: List[Dict[str, str]], **kwargs) -> str:
-        """发送消息到OpenAI并获取回复"""
-        response = self.client.chat.completions.create(
-            model=self.model,
-            messages=messages,
-            **kwargs
-        )
-        return response.choices[0].message.content
+        """发送消息到OpenAI并获取回复（带重试）"""
+        import time
+        max_retries = 3
+        
+        for attempt in range(max_retries):
+            try:
+                response = self.client.chat.completions.create(
+                    model=self.model,
+                    messages=messages,
+                    **kwargs
+                )
+                return response.choices[0].message.content
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    wait_time = (attempt + 1) * 5  # 5秒、10秒、15秒
+                    print(f"      [重试] API调用失败，{wait_time}秒后重试... ({attempt + 1}/{max_retries})")
+                    time.sleep(wait_time)
+                else:
+                    raise  # 最后一次重试失败则抛出异常
 
 
 class GeminiProvider(LLMProvider):
@@ -337,8 +353,6 @@ class PaperAnalyzer:
                 "如果我要发表类似的工作，应该如何组织论文结构？",
                 "我应该在论文中重点呈现哪些工作内容？哪些内容需要详细描述，哪些可以简略？",
                 "我应该把哪些工作通过图片或表格呈现出来？如何设计这些图表？",
-                "论文的语言表达有什么特点？如何保持学术性的同时提高可读性？",
-                "这篇论文在写作上有哪些值得学习的地方？又有哪些可以改进的地方？",
             ]
         }
     ]
@@ -399,19 +413,33 @@ class PaperAnalyzer:
 3. 直接给结论，不要解释过程
 4. 用数据/名词而非描述
 5. 总字数<60字
-6. 如果看到图片，优先分析图片内容"""
+6. 如果看到图片，优先分析图片内容
+7. 用简体中文回答"""
                 else:
                     # 其他类别：宽松限制，但要求简洁
-                    requirement = "要求：10个要点以内，每个要点不超过100字。请你尽可能简洁地回答，切中要点，不要有冗余的表达。"
+                    requirement = "要求：列出所有关键要点，每个要点简洁明了（50字以内）。根据内容复杂度决定要点数量，既不遗漏重点也不冗余凑数。"
                     system_prompt = """你是论文分析专家。回答要简洁明了：
 
 要求：
-1. 使用要点列表形式，逻辑清晰
-2. 最多10个要点，每个要点不超过100字
-3. 切中要点，避免冗余表达
-4. 结合论文的具体内容和图片进行分析
-5. 用具体的数据、方法名、章节名等实质性信息
-6. 如果看到图片，优先分析图片传达的核心信息"""
+1. 列出所有必要的关键要点（数量由内容复杂度决定，不要为了凑数）
+2. 每个要点控制在50字以内，言简意赅
+3. 直接说重点，避免铺垫和冗余
+4. 结合论文的具体内容（方法名、章节、图表、数据）
+5. 使用要点列表形式，逻辑清晰
+6. 用具体的数据、方法名、章节名等实质性信息
+7. 如果看到图片，优先分析图片传达的核心信息
+8. 用简体中文回答"""
+                
+                # 根据类别决定发送的图片数量（减少数量避免连接超时）
+                if category == "图表分析":
+                    # 图表分析类需要看更多图片
+                    max_images = min(len(image_paths), 10)
+                elif category == "基本信息":
+                    # 基本信息类只需少量图片
+                    max_images = min(len(image_paths), 0)
+                else:
+                    # 其他类别中等数量
+                    max_images = min(len(image_paths), 3)
                 
                 # 构建用户消息内容（支持多模态）
                 user_content = [
@@ -425,16 +453,22 @@ class PaperAnalyzer:
                     }
                 ]
                 
-                # 添加图片（限制前5张，避免token过多）
-                for img_path in image_paths[:5]:
+                # 添加图片到消息中（转换为base64）
+                sent_images = []
+                for img_path in image_paths[:max_images]:
                     try:
                         base64_image = self.image_to_base64(img_path)
                         user_content.append({
                             "type": "image_url",
                             "image_url": {"url": base64_image}
                         })
+                        sent_images.append(img_path.name)
                     except Exception as e:
                         print(f"    警告: 无法加载图片 {img_path.name}: {e}")
+                
+                # 显示发送的图片信息
+                if sent_images:
+                    print(f"    📎 已发送 {len(sent_images)} 张图片: {', '.join(sent_images[:3])}{'...' if len(sent_images) > 3 else ''}")
                 
                 # 构建消息
                 messages = [
@@ -448,13 +482,21 @@ class PaperAnalyzer:
                     }
                 ]
                 
-                # 获取LLM回答
-                answer = self.llm.chat(messages)
-                
-                category_result["qa_pairs"].append({
-                    "question": question,
-                    "answer": answer
-                })
+                # 获取LLM回答（带错误处理）
+                try:
+                    answer = self.llm.chat(messages)
+                    category_result["qa_pairs"].append({
+                        "question": question,
+                        "answer": answer
+                    })
+                except Exception as e:
+                    error_msg = f"[API错误: {str(e)[:100]}]"
+                    print(f"    [错误] {error_msg}")
+                    category_result["qa_pairs"].append({
+                        "question": question,
+                        "answer": error_msg
+                    })
+                    # 继续处理下一个问题，而不是完全失败
             
             results["categories"].append(category_result)
         
@@ -637,9 +679,12 @@ class PaperReadingAgent:
             except Exception as e:
                 failed += 1
                 print(f"\n❌ 失败: {pdf_file.name}")
-                print(f"错误信息: {e}")
-                import traceback
-                traceback.print_exc()
+                print(f"错误信息: {str(e)[:200]}")
+                print(f"\n提示: 如果是网络问题，可以稍后重新运行程序")
+                print(f"提示: 已处理的论文会被跳过，只处理剩余的论文")
+                # 只在调试时显示完整堆栈
+                # import traceback
+                # traceback.print_exc()
         
         # 打印总结
         print("\n" + "=" * 60)
